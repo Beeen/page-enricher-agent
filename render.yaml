@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: ai-trip-planner-backend
+    env: python
+    plan: free
+    rootDir: backend
+    buildCommand: |
+      curl -LsSf https://astral.sh/uv/install.sh | sh || true
+      export PATH="$HOME/.local/bin:$PATH"
+      python -m venv .venv
+      . .venv/bin/activate
+      if command -v uv >/dev/null 2>&1; then
+        uv pip install -r requirements.txt
+      else
+        pip install -U pip
+        pip install -r requirements.txt
+      fi
+    startCommand: .venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o-mini
+      - key: ARIZE_SPACE_ID
+        sync: false
+      - key: ARIZE_API_KEY
+        sync: false
