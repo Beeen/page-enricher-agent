@@ -12,8 +12,8 @@ from .search import (
 )
 from .rag import LocalGuideRetriever, GUIDE_RETRIEVER, ENABLE_RAG
 from .ra_client import parse_ra_url, fetch_ra_entity, normalize_ra_data
-from .hiker_client import search_instagram_accounts, get_instagram_profile
-from .soundcloud_client import search_soundcloud_users
+from .hiker_client import search_instagram_accounts, get_instagram_profile, get_instagram_profile_by_username
+from .soundcloud_client import search_soundcloud_users, get_soundcloud_user_by_permalink
 from .tracing import (
     _TRACING,
     using_prompt_template,
@@ -47,5 +47,7 @@ __all__ = [
     "normalize_ra_data",
     "search_instagram_accounts",
     "get_instagram_profile",
+    "get_instagram_profile_by_username",
     "search_soundcloud_users",
+    "get_soundcloud_user_by_permalink",
 ]

@@ -165,10 +165,13 @@ def enrich_entity(req: EnrichRequest):
         "ra_data": None,
         "entity_name": None,
         "missing_fields": None,
+        "ra_instagram_hint": None,
+        "ra_soundcloud_hint": None,
         "instagram_result": None,
         "soundcloud_result": None,
         "profile_picture": None,
         "bio": None,
+        "city": None,
         "final_profile": None,
         "tool_calls": [],
     }
@@ -185,7 +188,7 @@ def enrich_entity(req: EnrichRequest):
     entity_type = out.get("ra_entity_type") or "unknown"
 
     # Separate RA base fields from enriched fields
-    enriched_field_names = ["biography", "profile_picture", "instagram", "soundcloud"]
+    enriched_field_names = ["biography", "profile_picture", "instagram", "soundcloud", "city"]
     enriched_fields = {}
     missing_fields = []
 

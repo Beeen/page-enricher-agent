@@ -99,3 +99,43 @@ def search_soundcloud_users(query: str) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"[SOUNDCLOUD] User search failed for '{query}': {e}")
         return []
+
+
+def get_soundcloud_user_by_permalink(permalink_or_url: str) -> Optional[Dict[str, Any]]:
+    """Fetch a SoundCloud user profile by permalink or full URL.
+
+    Uses ``GET /users/{permalink}`` with OAuth Bearer authentication.
+
+    Args:
+        permalink_or_url: Either a permalink slug (e.g. ``"dj-name"``) or a full
+            SoundCloud URL (e.g. ``"https://soundcloud.com/dj-name"``).
+
+    Returns:
+        User dict or ``None`` on failure (including if the user does not exist).
+    """
+    token = _get_soundcloud_token()
+    if not token:
+        return None
+
+    # Extract permalink from full URL if needed
+    permalink = permalink_or_url.strip().rstrip("/")
+    if "soundcloud.com" in permalink:
+        permalink = permalink.split("soundcloud.com/")[-1].split("/")[0]
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                f"{SOUNDCLOUD_API_URL}/users/{permalink}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            print(f"[SOUNDCLOUD] Permalink '{permalink}' not found")
+        else:
+            print(f"[SOUNDCLOUD] User fetch by permalink failed for '{permalink}': {e}")
+        return None
+    except Exception as e:
+        print(f"[SOUNDCLOUD] User fetch by permalink failed for '{permalink}': {e}")
+        return None

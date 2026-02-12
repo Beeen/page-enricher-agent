@@ -88,3 +88,42 @@ def get_instagram_profile(user_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"[HIKER] Profile fetch failed for user_id={user_id}: {e}")
         return None
+
+
+def get_instagram_profile_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Fetch a detailed Instagram profile by username.
+
+    Uses the ``/v1/user/by/username`` endpoint.
+
+    Args:
+        username: Instagram username (with or without ``@`` prefix).
+
+    Returns:
+        Profile dict or ``None`` on failure (including if the username
+        does not exist).
+    """
+    try:
+        headers = _get_hiker_headers()
+    except RuntimeError:
+        return None
+
+    clean_username = username.strip().lstrip("@").strip("/")
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.get(
+                f"{HIKER_API_BASE_URL}/v1/user/by/username",
+                params={"username": clean_username},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            print(f"[HIKER] Username '{clean_username}' not found on Instagram")
+        else:
+            print(f"[HIKER] Profile fetch by username failed for '{clean_username}': {e}")
+        return None
+    except Exception as e:
+        print(f"[HIKER] Profile fetch by username failed for '{clean_username}': {e}")
+        return None

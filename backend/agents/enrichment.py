@@ -29,7 +29,9 @@ from shared import (
     normalize_ra_data,
     search_instagram_accounts,
     get_instagram_profile,
+    get_instagram_profile_by_username,
     search_soundcloud_users,
+    get_soundcloud_user_by_permalink,
 )
 
 
@@ -55,6 +57,10 @@ class EnrichmentState(TypedDict):
     # Gap analysis
     missing_fields: Optional[List[str]]
 
+    # RA-provided social links (passed to discovery for validation)
+    ra_instagram_hint: Optional[str]
+    ra_soundcloud_hint: Optional[str]
+
     # Discovery results
     instagram_result: Optional[Dict[str, Any]]
     soundcloud_result: Optional[Dict[str, Any]]
@@ -62,6 +68,7 @@ class EnrichmentState(TypedDict):
     # Resolution results
     profile_picture: Optional[Dict[str, Any]]
     bio: Optional[Dict[str, Any]]
+    city: Optional[Dict[str, Any]]
 
     # Final output
     final_profile: Optional[Dict[str, Any]]
@@ -154,7 +161,11 @@ def ra_scraper_node(state: EnrichmentState) -> dict:
 
 
 def gap_analysis_node(state: EnrichmentState) -> dict:
-    """Examine RA data and identify which enrichment fields are missing."""
+    """Examine RA data and identify which enrichment fields are missing.
+
+    Discovery nodes always run regardless of missing fields, but the
+    missing_fields list is still tracked for resolution/assembly logic.
+    """
     ra_data = state.get("ra_data") or {}
     missing: List[str] = []
 
@@ -167,26 +178,29 @@ def gap_analysis_node(state: EnrichmentState) -> dict:
     if not ra_data.get("bio"):
         missing.append("bio")
 
+    ra_instagram_hint = ra_data.get("instagram")
+    ra_soundcloud_hint = ra_data.get("soundcloud")
+
     return {
         "messages": [SystemMessage(content=f"Missing fields: {missing}")],
         "missing_fields": missing,
+        "ra_instagram_hint": ra_instagram_hint,
+        "ra_soundcloud_hint": ra_soundcloud_hint,
         "tool_calls": [{
             "agent": "gap_analysis", "tool": "analyze_gaps",
-            "result": {"missing": missing, "total_ra_fields": sum(1 for v in ra_data.values() if v is not None)},
+            "result": {
+                "missing": missing,
+                "total_ra_fields": sum(1 for v in ra_data.values() if v is not None),
+                "ra_instagram_hint": ra_instagram_hint,
+                "ra_soundcloud_hint": ra_soundcloud_hint,
+            },
         }],
     }
 
 
 def route_discovery_agents(state: EnrichmentState) -> List[str]:
-    """Determine which discovery agents to dispatch based on missing fields."""
-    missing = state.get("missing_fields") or []
-    targets: List[str] = []
-    if "instagram" in missing:
-        targets.append("instagram_node")
-    if "soundcloud" in missing:
-        targets.append("soundcloud_node")
-    # If nothing is missing, go straight to resolution
-    return targets if targets else ["resolution_node"]
+    """Always dispatch both discovery agents for cross-source validation."""
+    return ["instagram_node", "soundcloud_node"]
 
 
 # =============================================================================
@@ -194,13 +208,112 @@ def route_discovery_agents(state: EnrichmentState) -> List[str]:
 # =============================================================================
 
 
+def _build_ig_candidate_summary(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a compact summary of an Instagram profile for LLM evaluation."""
+    return {
+        "username": profile.get("username"),
+        "full_name": profile.get("full_name"),
+        "biography": profile.get("biography") or "",
+        "follower_count": profile.get("follower_count"),
+        "following_count": profile.get("following_count"),
+        "media_count": profile.get("media_count"),
+        "is_verified": profile.get("is_verified", False),
+        "is_business": profile.get("is_business", False),
+        "category": profile.get("category"),
+        "external_url": profile.get("external_url"),
+    }
+
+
+def _validate_ig_profile_against_ra(
+    profile: Dict[str, Any], entity_name: str, ra_data: Dict[str, Any], calls: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Ask the LLM whether a single Instagram profile matches the RA entity.
+
+    Returns the instagram_result dict if the profile matches (confidence >= 0.6),
+    or None if it does not.
+    """
+    candidate_summary = _build_ig_candidate_summary(profile)
+    ra_context = {
+        "name": entity_name,
+        "type": ra_data.get("page_type"),
+        "bio": (ra_data.get("bio") or "")[:300],
+        "country": ra_data.get("country"),
+    }
+
+    prompt = (
+        "You are evaluating whether an Instagram profile belongs to an "
+        "electronic music entity.\n\n"
+        f"Entity from Resident Advisor:\n{json.dumps(ra_context, indent=2)}\n\n"
+        f"Instagram profile:\n{json.dumps(candidate_summary, indent=2)}\n\n"
+        "Return a JSON object with:\n"
+        '- "is_match": boolean\n'
+        '- "confidence": float 0.0 to 1.0\n'
+        '- "reasoning": brief explanation\n\n'
+        "Only confirm the match if you are reasonably confident this is the same entity."
+    )
+
+    with using_attributes(tags=["instagram_discovery", "enrichment"]):
+        response = llm.invoke([
+            SystemMessage(content="You are a data matching specialist for the electronic music industry. Respond with JSON only."),
+            HumanMessage(content=prompt),
+        ])
+
+    calls.append({"agent": "instagram_discovery", "tool": "llm_validate_ra_link"})
+
+    result = _parse_llm_json(response.content if response.content else "")
+    is_match = (result or {}).get("is_match", False)
+    confidence = (result or {}).get("confidence", 0.0)
+
+    if is_match and confidence >= 0.6:
+        username = profile.get("username") or ""
+        return {
+            "url": f"https://instagram.com/{username}",
+            "profile_pic_url": profile.get("hd_profile_pic_url_info", {}).get("url")
+                or profile.get("profile_pic_url"),
+            "biography": profile.get("biography"),
+            "follower_count": profile.get("follower_count"),
+            "source": "hiker_api",
+            "confidence": confidence,
+        }
+    return None
+
+
 def instagram_discovery_node(state: EnrichmentState) -> dict:
-    """Discover and validate an Instagram account for the entity."""
+    """Discover and validate an Instagram account for the entity.
+
+    Branch A: If RA provides an Instagram link, fetch the profile and validate it.
+    Branch B: Search by entity name, fetch full profiles for top 3, LLM picks best.
+    """
     entity_name = state.get("entity_name") or "Unknown"
     ra_data = state.get("ra_data") or {}
+    ra_instagram_hint = state.get("ra_instagram_hint")
     calls: List[Dict[str, Any]] = []
 
-    # --- Step 1: Search via HikerAPI ---
+    # =================================================================
+    # Branch A: RA has an Instagram link — validate it
+    # =================================================================
+    if ra_instagram_hint:
+        ra_username = ra_instagram_hint.rstrip("/").split("/")[-1].lstrip("@")
+        ra_profile = get_instagram_profile_by_username(ra_username)
+        calls.append({
+            "agent": "instagram_discovery", "tool": "hiker_profile_by_username",
+            "args": {"username": ra_username},
+            "result": "found" if ra_profile else "not_found",
+        })
+
+        if ra_profile:
+            match = _validate_ig_profile_against_ra(ra_profile, entity_name, ra_data, calls)
+            if match:
+                return {
+                    "messages": [SystemMessage(content=f"RA Instagram link validated: @{ra_username} (confidence={match['confidence']:.2f})")],
+                    "instagram_result": match,
+                    "tool_calls": calls,
+                }
+            # RA link exists on Instagram but doesn't match — fall through to search
+
+    # =================================================================
+    # Branch B: Search by entity name
+    # =================================================================
     results = search_instagram_accounts(entity_name)
     calls.append({
         "agent": "instagram_discovery", "tool": "hiker_search",
@@ -226,17 +339,20 @@ def instagram_discovery_node(state: EnrichmentState) -> dict:
             "tool_calls": calls,
         }
 
-    # --- Step 2: LLM cross-reference to pick best match ---
-    candidates = [
-        {
-            "username": r.get("username"),
-            "full_name": r.get("full_name"),
-            "biography": (r.get("biography") or "")[:200],
-            "follower_count": r.get("follower_count"),
-            "is_verified": r.get("is_verified", False),
-        }
-        for r in results[:5]
-    ]
+    # --- Fetch full profiles for top 3 search results ---
+    enriched_candidates = []
+    for r in results[:3]:
+        user_id = str(r.get("pk") or r.get("id") or "")
+        profile = get_instagram_profile(user_id) if user_id else None
+        calls.append({
+            "agent": "instagram_discovery", "tool": "hiker_profile",
+            "args": {"user_id": user_id},
+            "result": "found" if profile else "not_found",
+        })
+        enriched_candidates.append(profile or r)
+
+    # --- LLM cross-reference to pick best match ---
+    llm_candidates = [_build_ig_candidate_summary(c) for c in enriched_candidates]
 
     ra_context = {
         "name": entity_name,
@@ -249,7 +365,7 @@ def instagram_discovery_node(state: EnrichmentState) -> dict:
         "You are evaluating Instagram search results to find the correct account "
         "for an electronic music entity.\n\n"
         f"Entity from Resident Advisor:\n{json.dumps(ra_context, indent=2)}\n\n"
-        f"Instagram search candidates:\n{json.dumps(candidates, indent=2)}\n\n"
+        f"Instagram candidates (with full profile data):\n{json.dumps(llm_candidates, indent=2)}\n\n"
         "Return a JSON object with:\n"
         '- "best_match_index": index (0-based) of the best matching account, or -1 if none match\n'
         '- "confidence": float 0.0 to 1.0\n'
@@ -263,29 +379,23 @@ def instagram_discovery_node(state: EnrichmentState) -> dict:
             HumanMessage(content=prompt),
         ])
 
-    calls.append({"agent": "instagram_discovery", "tool": "llm_cross_reference", "args": {"candidates": len(candidates)}})
+    calls.append({"agent": "instagram_discovery", "tool": "llm_cross_reference", "args": {"candidates": len(llm_candidates)}})
 
     match_result = _parse_llm_json(response.content if response.content else "")
     idx = (match_result or {}).get("best_match_index", -1)
     confidence = (match_result or {}).get("confidence", 0.0)
 
-    if isinstance(idx, int) and 0 <= idx < len(results) and confidence >= 0.6:
-        matched = results[idx]
-        user_id = str(matched.get("pk") or matched.get("id") or "")
-
-        # Fetch detailed profile for high-res picture + full bio
-        profile = get_instagram_profile(user_id) if user_id else None
-        calls.append({"agent": "instagram_discovery", "tool": "hiker_profile", "args": {"user_id": user_id}})
-
-        source_data = profile or matched
+    if isinstance(idx, int) and 0 <= idx < len(enriched_candidates) and confidence >= 0.6:
+        matched = enriched_candidates[idx]
+        username = matched.get("username") or ""
         return {
-            "messages": [SystemMessage(content=f"Instagram matched: @{matched.get('username')} (confidence={confidence:.2f})")],
+            "messages": [SystemMessage(content=f"Instagram matched: @{username} (confidence={confidence:.2f})")],
             "instagram_result": {
-                "url": f"https://instagram.com/{matched.get('username')}",
-                "profile_pic_url": source_data.get("hd_profile_pic_url_info", {}).get("url")
-                    or source_data.get("profile_pic_url"),
-                "biography": source_data.get("biography"),
-                "follower_count": source_data.get("follower_count"),
+                "url": f"https://instagram.com/{username}",
+                "profile_pic_url": matched.get("hd_profile_pic_url_info", {}).get("url")
+                    or matched.get("profile_pic_url"),
+                "biography": matched.get("biography"),
+                "follower_count": matched.get("follower_count"),
                 "source": "hiker_api",
                 "confidence": confidence,
             },
@@ -304,13 +414,112 @@ def instagram_discovery_node(state: EnrichmentState) -> dict:
 # =============================================================================
 
 
+def _build_sc_candidate_summary(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a compact summary of a SoundCloud user for LLM evaluation."""
+    return {
+        "permalink": user.get("permalink"),
+        "username": user.get("username"),
+        "full_name": user.get("full_name") or user.get("username"),
+        "description": (user.get("description") or "")[:300],
+        "followers_count": user.get("followers_count"),
+        "track_count": user.get("track_count"),
+        "city": user.get("city"),
+        "country": user.get("country"),
+    }
+
+
+def _validate_sc_profile_against_ra(
+    profile: Dict[str, Any], entity_name: str, ra_data: Dict[str, Any], calls: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Ask the LLM whether a single SoundCloud profile matches the RA entity.
+
+    Returns the soundcloud_result dict if the profile matches (confidence >= 0.6),
+    or None if it does not.
+    """
+    candidate_summary = _build_sc_candidate_summary(profile)
+    ra_context = {
+        "name": entity_name,
+        "type": ra_data.get("page_type"),
+        "bio": (ra_data.get("bio") or "")[:300],
+        "country": ra_data.get("country"),
+    }
+
+    prompt = (
+        "You are evaluating whether a SoundCloud profile belongs to an "
+        "electronic music entity.\n\n"
+        f"Entity from Resident Advisor:\n{json.dumps(ra_context, indent=2)}\n\n"
+        f"SoundCloud profile:\n{json.dumps(candidate_summary, indent=2)}\n\n"
+        "Return a JSON object with:\n"
+        '- "is_match": boolean\n'
+        '- "confidence": float 0.0 to 1.0\n'
+        '- "reasoning": brief explanation\n\n'
+        "Only confirm the match if you are reasonably confident this is the same entity."
+    )
+
+    with using_attributes(tags=["soundcloud_discovery", "enrichment"]):
+        response = llm.invoke([
+            SystemMessage(content="You are a data matching specialist for the electronic music industry. Respond with JSON only."),
+            HumanMessage(content=prompt),
+        ])
+
+    calls.append({"agent": "soundcloud_discovery", "tool": "llm_validate_ra_link"})
+
+    result = _parse_llm_json(response.content if response.content else "")
+    is_match = (result or {}).get("is_match", False)
+    confidence = (result or {}).get("confidence", 0.0)
+
+    if is_match and confidence >= 0.6:
+        permalink = profile.get("permalink") or profile.get("username") or ""
+        avatar = profile.get("avatar_url")
+        if avatar:
+            avatar = avatar.replace("-large.", "-t500x500.")
+        return {
+            "url": f"https://soundcloud.com/{permalink}",
+            "avatar_url": avatar,
+            "description": profile.get("description"),
+            "city": profile.get("city"),
+            "country": profile.get("country"),
+            "source": "soundcloud_api",
+            "confidence": confidence,
+        }
+    return None
+
+
 def soundcloud_discovery_node(state: EnrichmentState) -> dict:
-    """Discover and validate a SoundCloud account for the entity."""
+    """Discover and validate a SoundCloud account for the entity.
+
+    Branch A: If RA provides a SoundCloud link, fetch the profile and validate it.
+    Branch B: Search by entity name, use full user data for top 3, LLM picks best.
+    """
     entity_name = state.get("entity_name") or "Unknown"
     ra_data = state.get("ra_data") or {}
+    ra_soundcloud_hint = state.get("ra_soundcloud_hint")
     calls: List[Dict[str, Any]] = []
 
-    # --- Step 1: Search via SoundCloud API ---
+    # =================================================================
+    # Branch A: RA has a SoundCloud link — validate it
+    # =================================================================
+    if ra_soundcloud_hint:
+        ra_profile = get_soundcloud_user_by_permalink(ra_soundcloud_hint)
+        calls.append({
+            "agent": "soundcloud_discovery", "tool": "soundcloud_get_by_permalink",
+            "args": {"permalink": ra_soundcloud_hint},
+            "result": "found" if ra_profile else "not_found",
+        })
+
+        if ra_profile:
+            match = _validate_sc_profile_against_ra(ra_profile, entity_name, ra_data, calls)
+            if match:
+                return {
+                    "messages": [SystemMessage(content=f"RA SoundCloud link validated: {match['url']} (confidence={match['confidence']:.2f})")],
+                    "soundcloud_result": match,
+                    "tool_calls": calls,
+                }
+            # RA link exists on SoundCloud but doesn't match — fall through to search
+
+    # =================================================================
+    # Branch B: Search by entity name
+    # =================================================================
     results = search_soundcloud_users(entity_name)
     calls.append({
         "agent": "soundcloud_discovery", "tool": "soundcloud_search",
@@ -336,17 +545,9 @@ def soundcloud_discovery_node(state: EnrichmentState) -> dict:
             "tool_calls": calls,
         }
 
-    # --- Step 2: LLM cross-reference ---
-    candidates = [
-        {
-            "permalink": r.get("permalink"),
-            "username": r.get("username"),
-            "full_name": r.get("full_name") or r.get("username"),
-            "description": (r.get("description") or "")[:200],
-            "followers_count": r.get("followers_count"),
-        }
-        for r in results[:5]
-    ]
+    # --- LLM cross-reference top 3 results ---
+    top_results = results[:3]
+    llm_candidates = [_build_sc_candidate_summary(r) for r in top_results]
 
     ra_context = {
         "name": entity_name,
@@ -359,7 +560,7 @@ def soundcloud_discovery_node(state: EnrichmentState) -> dict:
         "You are evaluating SoundCloud search results to find the correct account "
         "for an electronic music entity.\n\n"
         f"Entity from Resident Advisor:\n{json.dumps(ra_context, indent=2)}\n\n"
-        f"SoundCloud search candidates:\n{json.dumps(candidates, indent=2)}\n\n"
+        f"SoundCloud candidates:\n{json.dumps(llm_candidates, indent=2)}\n\n"
         "Return a JSON object with:\n"
         '- "best_match_index": index (0-based) of the best matching account, or -1 if none match\n'
         '- "confidence": float 0.0 to 1.0\n'
@@ -373,21 +574,26 @@ def soundcloud_discovery_node(state: EnrichmentState) -> dict:
             HumanMessage(content=prompt),
         ])
 
-    calls.append({"agent": "soundcloud_discovery", "tool": "llm_cross_reference", "args": {"candidates": len(candidates)}})
+    calls.append({"agent": "soundcloud_discovery", "tool": "llm_cross_reference", "args": {"candidates": len(llm_candidates)}})
 
     match_result = _parse_llm_json(response.content if response.content else "")
     idx = (match_result or {}).get("best_match_index", -1)
     confidence = (match_result or {}).get("confidence", 0.0)
 
-    if isinstance(idx, int) and 0 <= idx < len(results) and confidence >= 0.6:
-        matched = results[idx]
+    if isinstance(idx, int) and 0 <= idx < len(top_results) and confidence >= 0.6:
+        matched = top_results[idx]
         permalink = matched.get("permalink") or matched.get("username") or ""
+        avatar = matched.get("avatar_url")
+        if avatar:
+            avatar = avatar.replace("-large.", "-t500x500.")
         return {
             "messages": [SystemMessage(content=f"SoundCloud matched: {permalink} (confidence={confidence:.2f})")],
             "soundcloud_result": {
                 "url": f"https://soundcloud.com/{permalink}",
-                "avatar_url": matched.get("avatar_url"),
+                "avatar_url": avatar,
                 "description": matched.get("description"),
+                "city": matched.get("city"),
+                "country": matched.get("country"),
                 "source": "soundcloud_api",
                 "confidence": confidence,
             },
@@ -488,11 +694,28 @@ def resolution_node(state: EnrichmentState) -> dict:
                 "confidence": 0.5,
             }
 
+    # --- City: RA > SoundCloud ---
+    city: Optional[Dict[str, Any]] = None
+
+    if ra_data.get("city"):
+        city = {
+            "value": ra_data["city"],
+            "source": "ra",
+            "confidence": 0.95,
+        }
+    elif sc.get("city"):
+        city = {
+            "value": sc["city"],
+            "source": "soundcloud",
+            "confidence": sc.get("confidence", 0.7),
+        }
+
     calls.append({
         "agent": "resolution", "tool": "priority_cascade",
         "result": {
             "pic_source": (profile_picture or {}).get("source"),
             "bio_source": (bio or {}).get("source"),
+            "city_source": (city or {}).get("source"),
         },
     })
 
@@ -500,6 +723,7 @@ def resolution_node(state: EnrichmentState) -> dict:
         "messages": [SystemMessage(content="Resolution complete")],
         "profile_picture": profile_picture,
         "bio": bio,
+        "city": city,
         "tool_calls": calls,
     }
 
@@ -540,32 +764,41 @@ def assembly_node(state: EnrichmentState) -> dict:
     if bio:
         final_profile["biography"] = bio
 
+    # --- Enriched: city (override RA base field with resolved value) ---
+    city_data = state.get("city")
+    if city_data:
+        final_profile["city"] = city_data
+
     # --- Enriched: Instagram ---
     if ig.get("url"):
+        # Discovery found a match — use it
         final_profile["instagram"] = {
             "value": ig["url"],
             "source": ig.get("source", "hiker_api"),
             "confidence": ig.get("confidence", 0.8),
         }
     elif ra_data.get("instagram"):
+        # Discovery didn't find a match but RA has a link — use at reduced confidence
         final_profile["instagram"] = {
             "value": ra_data["instagram"],
             "source": "ra",
-            "confidence": 1.0,
+            "confidence": 0.85,
         }
 
     # --- Enriched: SoundCloud ---
     if sc.get("url"):
+        # Discovery found a match — use it
         final_profile["soundcloud"] = {
             "value": sc["url"],
             "source": sc.get("source", "soundcloud_api"),
             "confidence": sc.get("confidence", 0.8),
         }
     elif ra_data.get("soundcloud"):
+        # Discovery didn't find a match but RA has a link — use at reduced confidence
         final_profile["soundcloud"] = {
             "value": ra_data["soundcloud"],
             "source": "ra",
-            "confidence": 1.0,
+            "confidence": 0.85,
         }
 
     # --- LLM consistency review ---
