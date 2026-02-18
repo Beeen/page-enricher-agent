@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 
 from shared import (
     llm,
-    _search_api,
+    _serp_search_raw,
     _serp_search_raw,
     _compact,
     _extract_url_from_text,
@@ -662,7 +662,7 @@ def _soundcloud_discovery_node_impl(state: EnrichmentState) -> dict:
     if not results:
         # Fallback: web search
         fallback_query = f"{entity_name} soundcloud official"
-        search_result = _search_api(fallback_query)
+        search_result = _serp_search_raw(fallback_query)
         calls.append({"agent": "soundcloud_discovery", "tool": "web_search_fallback", "args": {"query": fallback_query}})
         if search_result:
             url = _extract_url_from_text(search_result, "soundcloud")
@@ -795,7 +795,7 @@ def _resolution_node_impl(state: EnrichmentState) -> dict:
     else:
         # Google Search fallback
         search_query = f"{entity_name} {ra_data.get('page_type', 'artist')} profile photo"
-        search_result = _search_api(search_query)
+        search_result = _serp_search_raw(search_query)
         calls.append({"agent": "resolution", "tool": "google_image_fallback", "args": {"query": search_query}})
         if search_result:
             profile_picture = {

@@ -29,42 +29,6 @@ def _compact(text: str, limit: int = 200) -> str:
     return truncated.rstrip(",.;- ")
 
 
-def _search_api(query: str) -> Optional[str]:
-    """Search the web using Tavily if configured, return None otherwise."""
-    query = query.strip()
-    if not query:
-        return None
-
-    tavily_key = os.getenv("TAVILY_API_KEY")
-    if tavily_key:
-        try:
-            with httpx.Client(timeout=SEARCH_TIMEOUT) as client:
-                resp = client.post(
-                    "https://api.tavily.com/search",
-                    json={
-                        "api_key": tavily_key,
-                        "query": query,
-                        "max_results": 3,
-                        "search_depth": "basic",
-                        "include_answer": True,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                answer = data.get("answer") or ""
-                snippets = [
-                    item.get("content") or item.get("snippet") or ""
-                    for item in data.get("results", [])
-                ]
-                combined = " ".join([answer] + snippets).strip()
-                if combined:
-                    return _compact(combined)
-        except Exception:
-            pass
-
-    return None
-
-
 
 def _serp_search_raw(query: str) -> Optional[str]:
     """Search Google via SerpAPI and return full untruncated text.

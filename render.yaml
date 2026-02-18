@@ -46,3 +46,5 @@ services:
         sync: false
       - key: SOUNDCLOUD_CLIENT_SECRET
         sync: false
+      - key: SERPAPI_API_KEY
+        sync: false

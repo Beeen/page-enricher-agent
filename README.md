@@ -80,7 +80,7 @@ All agents, tools, and LLM calls → Arize Observability Platform
 ### 🚀 Intermediate Path
 1. **Enable Advanced Features** (20 min)
    - Set `ENABLE_RAG=1` to use vector search
-   - Add `TAVILY_API_KEY` for real-time web search
+   - Add `SERPAPI_API_KEY` for real-time web search
    - Compare results with/without these features
 
 2. **Add Custom Data** (45 min)
@@ -219,14 +219,11 @@ See `RAG.md` for detailed documentation.
 
 ### Web Search: Real-Time Tool Data
 
-Tools can call real web search APIs (Tavily or SerpAPI) for up-to-date travel information:
+Tools can call real web search APIs (SerpAPI) for up-to-date information:
 
-- **Enable**: Add `TAVILY_API_KEY` or `SERPAPI_API_KEY` to your `.env` file
-- **Benefits**: Real-time data for weather, attractions, prices, customs, etc.
+- **Enable**: Add `SERPAPI_API_KEY` to your `.env` file
+- **Benefits**: Real-time data for artist profiles, social links, etc.
 - **Fallback**: Without API keys, tools automatically fall back to LLM-generated responses
-- **Learning**: Demonstrates graceful degradation and multi-tier fallback patterns
-
-Recommended: Tavily (free tier: 1000 searches/month) - https://tavily.com
 
 ## Next Steps
 

@@ -246,9 +246,8 @@ FIRECRAWL_API_KEY=...              # Recommended for JS pages
 # OR
 BROWSERLESS_API_KEY=...            # Alternative scraping
 
-# Search APIs (at least one required)
-TAVILY_API_KEY=...                 # Recommended
-SERPAPI_API_KEY=...                # Fallback
+# Search API
+SERPAPI_API_KEY=...
 
 # Platform APIs (optional - enables direct search)
 SPOTIFY_CLIENT_ID=...
@@ -267,7 +266,7 @@ ARIZE_API_KEY=...
 Following the trip-planner pattern, every tool has a fallback:
 
 ```
-API Search → Web Search (Tavily/SerpAPI) → LLM Inference → Empty
+API Search → Web Search (SerpAPI) → LLM Inference → Empty
 ```
 
 Example:
@@ -281,7 +280,7 @@ def search_spotify(entity_name: str, entity_type: str) -> Optional[str]:
     
     # 2. Fallback to web search
     query = f"{entity_name} spotify {entity_type}"
-    result = _search_api(query)
+    result = _serp_search_raw(query)
     if result:
         return _extract_spotify_url(result)
     

@@ -2,7 +2,6 @@
 
 from .llm import llm, _init_llm
 from .search import (
-    _search_api,
     _serp_search_raw,
     _compact,
     _extract_url_from_text,
@@ -24,7 +23,6 @@ from .tracing import (
 __all__ = [
     "llm",
     "_init_llm",
-    "_search_api",
     "_serp_search_raw",
     "_compact",
     "_extract_url_from_text",
