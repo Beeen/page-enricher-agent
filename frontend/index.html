@@ -227,7 +227,7 @@
                                 <div class="absolute bottom-4 left-6 flex items-end gap-4 translate-y-1/2 z-10">
                                     <div class="w-20 h-20 bg-zinc-800 rounded border-2 border-black flex items-center justify-center overflow-hidden">
                                         <iconify-icon id="profile-pic-placeholder" icon="solar:user-circle-linear" class="text-zinc-600 text-4xl"></iconify-icon>
-                                        <img id="profile-pic" src="" class="w-full h-full object-cover grayscale hidden" alt="Entity">
+                                        <img id="profile-pic" src="" class="w-full h-full object-cover grayscale hidden" alt="Entity" referrerpolicy="no-referrer" onerror="this.classList.add('hidden'); document.getElementById('profile-pic-placeholder').classList.remove('hidden');">
                                     </div>
                                     <div class="pb-1">
                                         <h2 id="entity-name" class="text-xl font-medium text-white tracking-tight text-zinc-600">Awaiting input...</h2>
@@ -491,7 +491,7 @@ console.<span class="text-yellow-200">log</span>(<span class="text-blue-400">art
         const profilePicPlaceholder = document.getElementById('profile-pic-placeholder');
         const picUrl = fields.profile_picture?.value;
         if (picUrl && profilePic) {
-            profilePic.src = picUrl;
+            profilePic.src = `${API_BASE}/proxy-image?url=${encodeURIComponent(picUrl)}`;
             profilePic.classList.remove('hidden');
             profilePicPlaceholder.classList.add('hidden');
         }
@@ -500,7 +500,8 @@ console.<span class="text-yellow-200">log</span>(<span class="text-blue-400">art
         const coverBg = document.getElementById('cover-bg');
         const coverUrl = fields.cover_picture?.value;
         if (coverUrl && coverBg) {
-            coverBg.style.backgroundImage = `url('${coverUrl}')`;
+            coverBg.style.backgroundImage = `url('${API_BASE}/proxy-image?url=${encodeURIComponent(coverUrl)}')`;
+
         }
 
         // Name

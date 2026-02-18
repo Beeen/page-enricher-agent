@@ -88,6 +88,9 @@ temp/
 # Cursor
 .cursorrules
 
+# MCP config (contains API keys)
+.mcp.json
+
 test scripts/*.json
 backend/archive/ 
 

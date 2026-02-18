@@ -6,9 +6,6 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from .llm import llm
 
 try:
     import validators
@@ -33,7 +30,7 @@ def _compact(text: str, limit: int = 200) -> str:
 
 
 def _search_api(query: str) -> Optional[str]:
-    """Search the web using Tavily or SerpAPI if configured, return None otherwise."""
+    """Search the web using Tavily if configured, return None otherwise."""
     query = query.strip()
     if not query:
         return None
@@ -65,50 +62,54 @@ def _search_api(query: str) -> Optional[str]:
         except Exception:
             pass
 
-    serp_key = os.getenv("SERPAPI_API_KEY")
-    if serp_key:
-        try:
-            with httpx.Client(timeout=SEARCH_TIMEOUT) as client:
-                resp = client.get(
-                    "https://serpapi.com/search",
-                    params={
-                        "api_key": serp_key,
-                        "engine": "google",
-                        "num": 5,
-                        "q": query,
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                organic = data.get("organic_results", [])
-                snippets = [item.get("snippet", "") for item in organic]
-                combined = " ".join(snippets).strip()
-                if combined:
-                    return _compact(combined)
-        except Exception:
-            pass
-
     return None
 
 
-def _llm_fallback(instruction: str, context: Optional[str] = None) -> str:
-    """Use the LLM to generate a response when search APIs aren't available."""
-    prompt = "Respond with 200 characters or less.\n" + instruction.strip()
-    if context:
-        prompt += "\nContext:\n" + context.strip()
-    response = llm.invoke(
-        [
-            SystemMessage(content="You are a concise travel assistant."),
-            HumanMessage(content=prompt),
-        ]
-    )
-    return _compact(response.content)
 
+def _serp_search_raw(query: str) -> Optional[str]:
+    """Search Google via SerpAPI and return full untruncated text.
 
-def _with_prefix(prefix: str, summary: str) -> str:
-    """Add a prefix to a summary for clarity."""
-    text = f"{prefix}: {summary}" if prefix else summary
-    return _compact(text)
+    Requires the ``SERPAPI_API_KEY`` environment variable.
+
+    Returns:
+        Combined snippet text from organic results, or None on failure.
+    """
+    query = query.strip()
+    if not query:
+        return None
+
+    api_key = os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        print("[SEARCH] SERPAPI_API_KEY not configured, skipping SerpAPI search")
+        return None
+
+    try:
+        with httpx.Client(timeout=SEARCH_TIMEOUT) as client:
+            resp = client.get(
+                "https://serpapi.com/search",
+                params={
+                    "engine": "google",
+                    "api_key": api_key,
+                    "q": query,
+                    "num": 5,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("organic_results", [])
+            print(f"[SEARCH] SerpAPI '{query[:80]}' — {len(items)} result(s)")
+            for i, item in enumerate(items):
+                print(f"[SEARCH]   [{i}] {item.get('title', '?')} — {item.get('link', '?')}")
+            links = [item.get("link", "") for item in items]
+            snippets = [item.get("snippet", "") for item in items]
+            combined = " ".join(links + snippets).strip()
+            print(f"[SEARCH] SerpAPI combined snippet length: {len(combined)}")
+            if combined:
+                return combined
+    except Exception as e:
+        print(f"[SEARCH] SerpAPI search failed for '{query[:80]}': {e}")
+
+    return None
 
 
 def _extract_url_from_text(text: str, platform: str) -> Optional[str]:

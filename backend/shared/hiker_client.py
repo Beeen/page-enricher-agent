@@ -22,7 +22,7 @@ def _get_hiker_headers() -> Dict[str, str]:
 def search_instagram_accounts(query: str) -> List[Dict[str, Any]]:
     """Search Instagram accounts by name/keyword via HikerAPI.
 
-    Uses the ``/v2/search/accounts`` endpoint (fbsearch_accounts_v2).
+    Uses the ``/v2/fbsearch/accounts`` endpoint (fbsearch_accounts_v2).
 
     Args:
         query: Search term (e.g. entity name like "Mr. Scruff").
@@ -42,19 +42,26 @@ def search_instagram_accounts(query: str) -> List[Dict[str, Any]]:
     try:
         with httpx.Client(timeout=15.0) as client:
             resp = client.get(
-                f"{HIKER_API_BASE_URL}/v2/search/accounts",
+                f"{HIKER_API_BASE_URL}/v2/fbsearch/accounts",
                 params={"query": query},
                 headers=headers,
             )
             resp.raise_for_status()
             data = resp.json()
+            print(f"[HIKER] Search '{query}' — HTTP {resp.status_code}, response type: {type(data).__name__}")
 
             # The response may be a list directly or wrapped in a key
             if isinstance(data, list):
-                return data
-            if isinstance(data, dict):
-                return data.get("users") or data.get("results") or []
-            return []
+                results = data
+            elif isinstance(data, dict):
+                results = data.get("users") or data.get("results") or []
+                print(f"[HIKER] Search '{query}' — dict keys: {list(data.keys())}")
+            else:
+                results = []
+
+            usernames = [r.get("username") for r in results[:10]]
+            print(f"[HIKER] Search '{query}' — {len(results)} result(s): {usernames}")
+            return results
     except Exception as e:
         print(f"[HIKER] Instagram search failed for '{query}': {e}")
         return []
@@ -84,7 +91,9 @@ def get_instagram_profile(user_id: str) -> Optional[Dict[str, Any]]:
                 headers=headers,
             )
             resp.raise_for_status()
-            return resp.json()
+            profile = resp.json()
+            print(f"[HIKER] Profile fetched for user_id={user_id} — @{profile.get('username')}")
+            return profile
     except Exception as e:
         print(f"[HIKER] Profile fetch failed for user_id={user_id}: {e}")
         return None
@@ -117,7 +126,9 @@ def get_instagram_profile_by_username(username: str) -> Optional[Dict[str, Any]]
                 headers=headers,
             )
             resp.raise_for_status()
-            return resp.json()
+            profile = resp.json()
+            print(f"[HIKER] Profile fetched for username='{clean_username}' — @{profile.get('username')}")
+            return profile
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             print(f"[HIKER] Username '{clean_username}' not found on Instagram")

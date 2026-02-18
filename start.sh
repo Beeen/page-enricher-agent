@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# Trip Planner Startup Script
+# Signal API Startup Script
 
-echo "🚀 Starting AI Trip Planner..."
+echo "🚀 Starting Signal API..."
 
 # Check if we're in the right directory
 if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
-    echo "❌ Error: Please run this script from the trip_planner directory"
+    echo "❌ Error: Please run this script from the project root directory"
     exit 1
 fi
 

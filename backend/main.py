@@ -1,12 +1,14 @@
-"""AI Trip Planner API - FastAPI interface for trip planning and entity enrichment."""
+"""Signal API - FastAPI interface for RA entity enrichment."""
 
 import os
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse as _urlparse
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv, find_dotenv
 
@@ -19,29 +21,12 @@ from shared import (
     using_attributes,
     init_tracing,
 )
-from agents import build_graph, build_enrichment_graph
+from agents import build_enrichment_graph
 
 
 # =============================================================================
 # REQUEST/RESPONSE MODELS
 # =============================================================================
-
-
-class TripRequest(BaseModel):
-    destination: str
-    duration: str
-    budget: Optional[str] = None
-    interests: Optional[str] = None
-    travel_style: Optional[str] = None
-    user_input: Optional[str] = None
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
-    turn_index: Optional[int] = None
-
-
-class TripResponse(BaseModel):
-    result: str
-    tool_calls: List[Dict[str, Any]] = []
 
 
 class EnrichRequest(BaseModel):
@@ -75,7 +60,7 @@ class EnrichResponse(BaseModel):
 # FASTAPI APPLICATION
 # =============================================================================
 
-app = FastAPI(title="AI Trip Planner")
+app = FastAPI(title="Signal API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -99,40 +84,40 @@ def serve_frontend():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "ai-trip-planner"}
+    return {"status": "healthy", "service": "signal-api"}
 
 
-@app.post("/plan-trip", response_model=TripResponse)
-def plan_trip(req: TripRequest):
-    graph = build_graph()
+_PROXY_ALLOWED_DOMAINS = (
+    "cdninstagram.com",
+    "instagram.com",
+    "sndcdn.com",
+    "soundcloud.com",
+    "ra.co",
+)
 
-    state = {
-        "messages": [],
-        "trip_request": req.model_dump(),
-        "tool_calls": [],
-    }
 
-    session_id = req.session_id
-    user_id = req.user_id
-    turn_idx = req.turn_index
+@app.get("/proxy-image")
+def proxy_image(url: str = Query(..., description="Image URL to proxy")):
+    """Proxy an external image to avoid CDN referrer restrictions."""
+    parsed = _urlparse(url)
+    if not parsed.scheme.startswith("http") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Invalid image URL")
 
-    attrs_kwargs = {}
-    if session_id:
-        attrs_kwargs["session_id"] = session_id
-    if user_id:
-        attrs_kwargs["user_id"] = user_id
+    if not any(parsed.netloc.endswith(d) for d in _PROXY_ALLOWED_DOMAINS):
+        raise HTTPException(status_code=403, detail="Domain not allowed")
 
-    if turn_idx is not None and _TRACING:
-        with using_attributes(**attrs_kwargs):
-            current_span = trace.get_current_span()
-            if current_span:
-                current_span.set_attribute("turn_index", turn_idx)
-            out = graph.invoke(state)
-    else:
-        with using_attributes(**attrs_kwargs):
-            out = graph.invoke(state)
-
-    return TripResponse(result=out.get("final", ""), tool_calls=out.get("tool_calls", []))
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "image/jpeg")
+            return Response(
+                content=resp.content,
+                media_type=content_type,
+                headers={"Cache-Control": "public, max-age=3600"},
+            )
+    except Exception:
+        raise HTTPException(status_code=502, detail="Failed to fetch image")
 
 
 @app.post("/enrich", response_model=EnrichResponse)
@@ -145,8 +130,6 @@ def enrich_entity(req: EnrichRequest):
         raise HTTPException(status_code=400, detail="Invalid URL provided")
 
     # Validate RA domain
-    from urllib.parse import urlparse as _urlparse
-
     parsed_url = _urlparse(req.url)
     if parsed_url.netloc not in ("ra.co", "www.ra.co"):
         raise HTTPException(
@@ -167,6 +150,7 @@ def enrich_entity(req: EnrichRequest):
         "missing_fields": None,
         "ra_instagram_hint": None,
         "ra_soundcloud_hint": None,
+        "instagram_candidates": None,
         "instagram_result": None,
         "soundcloud_result": None,
         "profile_picture": None,

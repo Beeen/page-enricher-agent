@@ -49,7 +49,7 @@ def init_tracing():
         api_key = os.getenv("ARIZE_API_KEY")
         if space_id and api_key:
             tp = register(
-                space_id=space_id, api_key=api_key, project_name="ai-trip-planner"
+                space_id=space_id, api_key=api_key, project_name="signal-api"
             )
             LangChainInstrumentor().instrument(
                 tracer_provider=tp,
