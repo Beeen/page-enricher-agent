@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -55,7 +55,7 @@ def _serp_search_raw(query: str) -> Optional[str]:
                     "engine": "google",
                     "api_key": api_key,
                     "q": query,
-                    "num": 5,
+                    "num": 10,
                 },
             )
             resp.raise_for_status()
@@ -101,6 +101,39 @@ def _extract_url_from_text(text: str, platform: str) -> Optional[str]:
         elif platform == "website":
             return f"https://{match.group(1)}"
     return None
+
+
+_IG_NON_PROFILE_SEGMENTS = frozenset({
+    "p", "reel", "reels", "explore", "stories", "tv",
+    "accounts", "directory", "developer", "about", "legal",
+    "emails", "press", "api", "privacy", "terms", "help",
+})
+
+
+def _extract_ig_usernames_from_text(text: str, max_results: int = 5) -> List[str]:
+    """Extract valid Instagram profile usernames from text.
+
+    Uses findall to get ALL matches, filters out non-profile path segments
+    (reels, posts, explore, etc.), deduplicates, and returns up to max_results.
+    """
+    if not text:
+        return []
+
+    pattern = r"(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_\.]+)/?"
+    matches = re.findall(pattern, text, re.IGNORECASE)
+
+    seen: set = set()
+    usernames: list = []
+    for username in matches:
+        lower = username.lower()
+        if lower in seen or lower in _IG_NON_PROFILE_SEGMENTS:
+            continue
+        seen.add(lower)
+        usernames.append(username)
+        if len(usernames) >= max_results:
+            break
+
+    return usernames
 
 
 def _validate_url(url: str) -> bool:

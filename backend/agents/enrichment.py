@@ -20,6 +20,7 @@ from shared import (
     _serp_search_raw,
     _compact,
     _extract_url_from_text,
+    _extract_ig_usernames_from_text,
     _validate_url,
     _TRACING,
     trace,
@@ -28,7 +29,6 @@ from shared import (
     parse_ra_url,
     fetch_ra_entity,
     normalize_ra_data,
-    search_instagram_accounts,
     get_instagram_profile,
     get_instagram_profile_by_username,
     search_soundcloud_users,
@@ -62,8 +62,10 @@ class EnrichmentState(TypedDict):
     ra_instagram_hint: Optional[str]
     ra_soundcloud_hint: Optional[str]
 
+    # Prefetched metadata from known profile URLs (city, country, bio, etc.)
+    discovered_metadata: Optional[Dict[str, Any]]
+
     # Discovery results
-    instagram_candidates: Optional[List[Dict[str, Any]]]
     instagram_result: Optional[Dict[str, Any]]
     soundcloud_result: Optional[Dict[str, Any]]
 
@@ -200,13 +202,70 @@ def gap_analysis_node(state: EnrichmentState) -> dict:
     }
 
 
+def prefetch_known_profiles_node(state: EnrichmentState) -> dict:
+    """Fetch profiles from platforms where RA already provides a URL.
+
+    Collects metadata (city, country, bio, real_name) before discovery nodes
+    run, so search queries on unknown platforms can use richer context.
+    """
+    ra_soundcloud_hint = state.get("ra_soundcloud_hint")
+    ra_instagram_hint = state.get("ra_instagram_hint")
+    calls: List[Dict[str, Any]] = []
+    metadata: Dict[str, Any] = {}
+
+    # --- SoundCloud ---
+    if ra_soundcloud_hint:
+        profile = get_soundcloud_user_by_permalink(ra_soundcloud_hint)
+        metadata["_sc_prefetched"] = True
+        calls.append({
+            "agent": "prefetch", "tool": "soundcloud_get_by_permalink",
+            "args": {"permalink": ra_soundcloud_hint},
+            "result": "found" if profile else "not_found",
+        })
+        if profile:
+            metadata["_sc_profile"] = profile  # cache for discovery node
+            for key in ("city", "country", "description"):
+                val = profile.get(key)
+                if val and key not in metadata:
+                    metadata[key] = val
+            full_name = profile.get("full_name") or profile.get("username")
+            if full_name and "real_name" not in metadata:
+                metadata["real_name"] = full_name
+
+    # --- Instagram ---
+    if ra_instagram_hint:
+        username = ra_instagram_hint.rstrip("/").split("/")[-1].lstrip("@")
+        profile = get_instagram_profile_by_username(username)
+        calls.append({
+            "agent": "prefetch", "tool": "instagram_get_by_username",
+            "args": {"username": username},
+            "result": "found" if profile else "not_found",
+        })
+        if profile:
+            bio = profile.get("biography")
+            if bio and "bio" not in metadata:
+                metadata["bio"] = bio
+            full_name = profile.get("full_name")
+            if full_name and "real_name" not in metadata:
+                metadata["real_name"] = full_name
+
+    # (Future: Spotify, Bandcamp, Discogs — same pattern)
+
+    print(f"[PREFETCH] Collected metadata from known profiles: {metadata}")
+    return {
+        "discovered_metadata": metadata,
+        "messages": [SystemMessage(content=f"Prefetch metadata: {metadata}")],
+        "tool_calls": calls,
+    }
+
+
 def route_discovery_agents(state: EnrichmentState) -> List[str]:
     """Route to discovery agents based on which fields are actually missing."""
     missing = state.get("missing_fields") or []
     routes: List[str] = []
     # Instagram helps with: instagram link, profile_picture, bio
     if any(f in missing for f in ["instagram", "profile_picture", "bio"]):
-        routes.append("instagram_search_node")
+        routes.append("instagram_discovery_node")
     # SoundCloud helps with: soundcloud link, bio, city
     if any(f in missing for f in ["soundcloud", "bio", "city"]):
         routes.append("soundcloud_discovery_node")
@@ -288,39 +347,43 @@ def _validate_ig_profile_against_ra(
     return None
 
 
-def instagram_search_node(state: EnrichmentState) -> dict:
-    """Find Instagram candidates via multi-query HikerAPI search + Google fallback.
+def instagram_discovery_node(state: EnrichmentState) -> dict:
+    """Search for Instagram candidates and match the best one in a single step.
 
     Strategy:
     1. If RA provides an Instagram hint, add it as a candidate.
-    2. Try multiple HikerAPI search queries (name, name+city, name+country).
+    2. Try HikerAPI search queries.
     3. If no HikerAPI results, fall back to Google search restricted to instagram.com.
+    4. Fetch full profiles for top candidates.
+    5. LLM cross-reference to pick the best match.
 
-    Returns instagram_candidates in state for instagram_match_node to evaluate.
+    Returns instagram_result directly.
     """
     try:
-        return _instagram_search_node_impl(state)
+        return _instagram_discovery_node_impl(state)
     except Exception as e:
-        print(f"[INSTAGRAM] instagram_search_node error: {e}")
+        print(f"[INSTAGRAM] instagram_discovery_node error: {e}")
         return {
-            "messages": [SystemMessage(content=f"Instagram search failed: {e}")],
-            "instagram_candidates": [],
-            "tool_calls": [{"agent": "instagram_search", "tool": "error", "result": str(e)}],
+            "messages": [SystemMessage(content=f"Instagram discovery failed: {e}")],
+            "instagram_result": None,
+            "tool_calls": [{"agent": "instagram_discovery", "tool": "error", "result": str(e)}],
         }
 
 
-def _instagram_search_node_impl(state: EnrichmentState) -> dict:
+def _instagram_discovery_node_impl(state: EnrichmentState) -> dict:
     entity_name = state.get("entity_name") or "Unknown"
     ra_data = state.get("ra_data") or {}
     ra_instagram_hint = state.get("ra_instagram_hint")
-    print(f"[INSTAGRAM] instagram_search_node entered for '{entity_name}'")
+    print(f"[INSTAGRAM] instagram_discovery_node entered for '{entity_name}'")
     calls: List[Dict[str, Any]] = []
     candidates: List[Dict[str, Any]] = []
     seen_pks: set = set()
 
     # =================================================================
-    # Step 1: RA hint — add as first candidate
+    # Phase 1: Search for candidates
     # =================================================================
+
+    # Step 1: RA hint — add as first candidate
     if ra_instagram_hint:
         ra_username = ra_instagram_hint.rstrip("/").split("/")[-1].lstrip("@")
         candidates.append({
@@ -332,93 +395,44 @@ def _instagram_search_node_impl(state: EnrichmentState) -> dict:
             "args": {"username": ra_username},
         })
 
-    # =================================================================
-    # Step 2: HikerAPI search (single query)
-    # =================================================================
-    city = ra_data.get("city")
-    country = ra_data.get("country")
-    results = search_instagram_accounts(entity_name)
+    # Step 2: SerpAPI Google search (site:instagram.com)
+    meta = state.get("discovered_metadata") or {}
+    city = ra_data.get("city") or meta.get("city")
+    country = ra_data.get("country") or meta.get("country")
+    page_type = ra_data.get("page_type", "artist")
+    serp_query = f"site:instagram.com {entity_name} {page_type}"
+    if city:
+        serp_query += f" {city}"
+
+    raw_search_result = _serp_search_raw(serp_query)
+    google_usernames = _extract_ig_usernames_from_text(raw_search_result, max_results=5) if raw_search_result else []
+
     calls.append({
-        "agent": "instagram_search", "tool": "hiker_search",
-        "args": {"query": entity_name}, "result_count": len(results),
+        "agent": "instagram_search",
+        "tool": "serp_search",
+        "args": {"query": serp_query, "site": "instagram.com"},
+        "debug": {
+            "raw_text_length": len(raw_search_result) if raw_search_result else 0,
+            "raw_text_preview": _compact(raw_search_result, limit=500) if raw_search_result else None,
+            "extracted_usernames": google_usernames,
+        },
     })
 
-    for r in results:
-        pk = str(r.get("pk") or r.get("id") or "")
-        if pk and pk not in seen_pks:
-            seen_pks.add(pk)
+    existing_usernames = {c.get("username") for c in candidates}
+    for username in google_usernames:
+        if username not in existing_usernames:
             candidates.append({
-                "pk": pk,
-                "username": r.get("username"),
-                "full_name": r.get("full_name"),
-                "source": "hiker_search",
-                "query": entity_name,
+                "username": username,
+                "source": "serp_search",
             })
+            existing_usernames.add(username)
+
+    candidates = candidates[:10]
+    print(f"[INSTAGRAM] search phase complete: {len(candidates)} candidate(s) found")
 
     # =================================================================
-    # Step 3: Google fallback (only if no HikerAPI results)
+    # Phase 2: Match best candidate
     # =================================================================
-    hiker_candidates = [c for c in candidates if c["source"] == "hiker_search"]
-    if not hiker_candidates:
-        page_type = ra_data.get("page_type", "artist")
-        fallback_query = f"site:instagram.com {entity_name} {page_type}"
-        if city:
-            fallback_query += f" {city}"
-
-        raw_search_result = _serp_search_raw(fallback_query)
-        extracted_url = _extract_url_from_text(raw_search_result, "instagram") if raw_search_result else None
-
-        calls.append({
-            "agent": "instagram_search",
-            "tool": "serp_search_fallback",
-            "args": {"query": fallback_query, "site": "instagram.com"},
-            "debug": {
-                "raw_text_length": len(raw_search_result) if raw_search_result else 0,
-                "raw_text_preview": _compact(raw_search_result, limit=500) if raw_search_result else None,
-                "extracted_url": extracted_url,
-            },
-        })
-
-        if extracted_url:
-            # Extract username from the URL
-            username = extracted_url.rstrip("/").split("/")[-1]
-            if username and username not in {c.get("username") for c in candidates}:
-                candidates.append({
-                    "username": username,
-                    "source": "google_search",
-                })
-
-    msg = f"Instagram search: {len(candidates)} candidate(s) found"
-    return {
-        "messages": [SystemMessage(content=msg)],
-        "instagram_candidates": candidates[:5],
-        "tool_calls": calls,
-    }
-
-
-def instagram_match_node(state: EnrichmentState) -> dict:
-    """Fetch full profiles for Instagram candidates and LLM-select the best match.
-
-    Reads instagram_candidates from state (set by instagram_search_node).
-    Returns instagram_result with the matched profile or None.
-    """
-    try:
-        return _instagram_match_node_impl(state)
-    except Exception as e:
-        print(f"[INSTAGRAM] instagram_match_node error: {e}")
-        return {
-            "messages": [SystemMessage(content=f"Instagram match failed: {e}")],
-            "instagram_result": None,
-            "tool_calls": [{"agent": "instagram_match", "tool": "error", "result": str(e)}],
-        }
-
-
-def _instagram_match_node_impl(state: EnrichmentState) -> dict:
-    candidates = state.get("instagram_candidates") or []
-    entity_name = state.get("entity_name") or "Unknown"
-    ra_data = state.get("ra_data") or {}
-    print(f"[INSTAGRAM] instagram_match_node entered for '{entity_name}' — {len(candidates)} candidate(s)")
-    calls: List[Dict[str, Any]] = []
 
     if not candidates:
         return {
@@ -427,11 +441,9 @@ def _instagram_match_node_impl(state: EnrichmentState) -> dict:
             "tool_calls": calls,
         }
 
-    # =================================================================
-    # Step 1: Fetch full profiles for each candidate
-    # =================================================================
+    # Step 4: Fetch full profiles for each candidate
     enriched_candidates = []
-    for c in candidates[:5]:
+    for c in candidates:
         pk = c.get("pk")
         username = c.get("username")
         profile = None
@@ -460,9 +472,7 @@ def _instagram_match_node_impl(state: EnrichmentState) -> dict:
             "tool_calls": calls,
         }
 
-    # =================================================================
-    # Step 2: LLM cross-reference to pick best match
-    # =================================================================
+    # Step 5: LLM cross-reference to pick best match
     llm_candidates = [_build_ig_candidate_summary(c) for c in enriched_candidates]
 
     ra_context = {
@@ -633,11 +643,17 @@ def _soundcloud_discovery_node_impl(state: EnrichmentState) -> dict:
     # Branch A: RA has a SoundCloud link — validate it
     # =================================================================
     if ra_soundcloud_hint:
-        ra_profile = get_soundcloud_user_by_permalink(ra_soundcloud_hint)
+        # Reuse prefetch result if available, otherwise fetch
+        meta = state.get("discovered_metadata") or {}
+        if meta.get("_sc_prefetched"):
+            ra_profile = meta.get("_sc_profile")  # may be None if not found
+        else:
+            ra_profile = get_soundcloud_user_by_permalink(ra_soundcloud_hint)
         calls.append({
             "agent": "soundcloud_discovery", "tool": "soundcloud_get_by_permalink",
             "args": {"permalink": ra_soundcloud_hint},
             "result": "found" if ra_profile else "not_found",
+            "cached": "_sc_profile" in meta,
         })
 
         if ra_profile:
@@ -1021,32 +1037,30 @@ def build_enrichment_graph():
 
     g.add_node("ra_scraper_node", ra_scraper_node)
     g.add_node("gap_analysis_node", gap_analysis_node)
-    g.add_node("instagram_search_node", instagram_search_node)
-    g.add_node("instagram_match_node", instagram_match_node)
+    g.add_node("prefetch_known_profiles_node", prefetch_known_profiles_node)
+    g.add_node("instagram_discovery_node", instagram_discovery_node)
     g.add_node("soundcloud_discovery_node", soundcloud_discovery_node)
     g.add_node("resolution_node", resolution_node)
     g.add_node("assembly_node", assembly_node)
 
-    # Sequential: START -> RA scrape -> gap analysis
+    # Sequential: START -> RA scrape -> gap analysis -> prefetch known profiles
     g.add_edge(START, "ra_scraper_node")
     g.add_edge("ra_scraper_node", "gap_analysis_node")
+    g.add_edge("gap_analysis_node", "prefetch_known_profiles_node")
 
-    # Conditional parallel: gap analysis routes to discovery agents or straight to resolution
+    # Conditional parallel: prefetch routes to discovery agents or straight to resolution
     g.add_conditional_edges(
-        "gap_analysis_node",
+        "prefetch_known_profiles_node",
         route_discovery_agents,
         {
-            "instagram_search_node": "instagram_search_node",
+            "instagram_discovery_node": "instagram_discovery_node",
             "soundcloud_discovery_node": "soundcloud_discovery_node",
             "resolution_node": "resolution_node",
         },
     )
 
-    # Instagram: search -> match -> resolution
-    g.add_edge("instagram_search_node", "instagram_match_node")
-    g.add_edge("instagram_match_node", "resolution_node")
-
-    # SoundCloud: discovery -> resolution
+    # Both discovery branches -> resolution (same superstep = single fan-in)
+    g.add_edge("instagram_discovery_node", "resolution_node")
     g.add_edge("soundcloud_discovery_node", "resolution_node")
 
     # Resolution -> Assembly -> END

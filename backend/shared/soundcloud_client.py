@@ -123,9 +123,10 @@ def get_soundcloud_user_by_permalink(permalink_or_url: str) -> Optional[Dict[str
         permalink = permalink.split("soundcloud.com/")[-1].split("/")[0]
 
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
             resp = client.get(
-                f"{SOUNDCLOUD_API_URL}/users/{permalink}",
+                f"{SOUNDCLOUD_API_URL}/resolve",
+                params={"url": f"https://soundcloud.com/{permalink}"},
                 headers={"Authorization": f"Bearer {token}"},
             )
             resp.raise_for_status()

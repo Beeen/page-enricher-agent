@@ -5,6 +5,7 @@ from .search import (
     _serp_search_raw,
     _compact,
     _extract_url_from_text,
+    _extract_ig_usernames_from_text,
     _validate_url,
     SEARCH_TIMEOUT,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "_serp_search_raw",
     "_compact",
     "_extract_url_from_text",
+    "_extract_ig_usernames_from_text",
     "_validate_url",
     "SEARCH_TIMEOUT",
     "_TRACING",

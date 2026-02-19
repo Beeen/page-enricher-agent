@@ -151,7 +151,7 @@ def enrich_entity(req: EnrichRequest):
         "missing_fields": None,
         "ra_instagram_hint": None,
         "ra_soundcloud_hint": None,
-        "instagram_candidates": None,
+        "discovered_metadata": None,
         "instagram_result": None,
         "soundcloud_result": None,
         "profile_picture": None,
